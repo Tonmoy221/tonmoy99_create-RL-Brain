@@ -18,6 +18,8 @@ from config import (
     CLIP_CONSISTENCY_THRESHOLD,
     LLM_MODEL,
     LLM_PROVIDER,
+    MAX_SCENES,
+    MIN_SCENES,
     OLLAMA_BASE_URL,
     OLLAMA_TIMEOUT_SECONDS,
     OPENAI_API_KEY_ENV,
@@ -152,7 +154,14 @@ class DirectorAgent:
 
         if "characters" in doc and isinstance(doc["characters"], list):
             for index, ch in enumerate(doc["characters"]):
-                for key in ["id", "name", "visual_description"]:
+                for key in [
+                    "id",
+                    "name",
+                    "age",
+                    "gender",
+                    "wardrobe",
+                    "visual_description",
+                ]:
                     if key not in ch:
                         errors.append(f"Character {index} missing {key}")
         else:
@@ -160,7 +169,13 @@ class DirectorAgent:
 
         if "locations" in doc and isinstance(doc["locations"], list):
             for index, loc in enumerate(doc["locations"]):
-                for key in ["id", "name", "visual_description"]:
+                for key in [
+                    "id",
+                    "name",
+                    "scenery_type",
+                    "material_palette",
+                    "visual_description",
+                ]:
                     if key not in loc:
                         errors.append(f"Location {index} missing {key}")
         else:
@@ -177,11 +192,22 @@ class DirectorAgent:
                     "emotional_tone",
                     "time_of_day",
                     "weather",
+                    "scene_prompt",
+                    "continuity_constraints",
                 ]:
                     if key not in scene:
                         errors.append(f"Scene {index} missing {key}")
         else:
             errors.append("scenes must be a list")
+
+        if len(doc.get("scenes", [])) < MIN_SCENES:
+            errors.append(
+                f"Scene count too low: expected at least {MIN_SCENES}, got {len(doc.get('scenes', []))}"
+            )
+        if len(doc.get("scenes", [])) > MAX_SCENES:
+            errors.append(
+                f"Scene count too high: max {MAX_SCENES}, got {len(doc.get('scenes', []))}"
+            )
 
         character_ids = {
             c.get("id") for c in doc.get("characters", []) if isinstance(c, dict)
@@ -202,6 +228,75 @@ class DirectorAgent:
                 )
 
         return len(errors) == 0, errors
+
+    @staticmethod
+    def _normalize_creative_document(doc: Dict[str, Any]) -> Dict[str, Any]:
+        characters: List[Dict[str, Any]] = []
+        for index, item in enumerate(doc.get("characters", [])):
+            cid = item.get("id", f"char_{index + 1}")
+            characters.append(
+                {
+                    "id": str(cid),
+                    "name": item.get("name", f"Character {index + 1}"),
+                    "age": item.get("age", "adult"),
+                    "gender": item.get("gender", "unspecified"),
+                    "wardrobe": item.get("wardrobe", "consistent outfit"),
+                    "visual_description": item.get("visual_description", ""),
+                    "reference_image_paths": item.get("reference_image_paths", []),
+                }
+            )
+
+        locations: List[Dict[str, Any]] = []
+        for index, item in enumerate(doc.get("locations", [])):
+            lid = item.get("id", f"loc_{index + 1}")
+            locations.append(
+                {
+                    "id": str(lid),
+                    "name": item.get("name", f"Location {index + 1}"),
+                    "scenery_type": item.get("scenery_type", "environment"),
+                    "material_palette": item.get("material_palette", "neutral tones"),
+                    "visual_description": item.get("visual_description", ""),
+                    "reference_image_paths": item.get("reference_image_paths", []),
+                }
+            )
+
+        scenes: List[Dict[str, Any]] = []
+        for index, item in enumerate(doc.get("scenes", [])):
+            sid = item.get("scene_id", f"scene_{index + 1}")
+            scenes.append(
+                {
+                    "scene_id": str(sid),
+                    "narrative_description": item.get(
+                        "narrative_description", "Cinematic progression scene"
+                    ),
+                    "scene_prompt": item.get(
+                        "scene_prompt", item.get("narrative_description", "")
+                    ),
+                    "character_ids": [
+                        str(cid) for cid in item.get("character_ids", [])
+                    ],
+                    "location_id": str(item.get("location_id", "")),
+                    "camera_style": item.get("camera_style", "cinematic tracking shot"),
+                    "emotional_tone": item.get("emotional_tone", "neutral"),
+                    "time_of_day": item.get("time_of_day", "day"),
+                    "weather": item.get("weather", "clear"),
+                    "continuity_constraints": item.get(
+                        "continuity_constraints",
+                        "Keep character identity, outfit, and scenery palette unchanged.",
+                    ),
+                }
+            )
+
+        return {
+            "characters": characters,
+            "locations": locations,
+            "scenes": scenes,
+            "cinematic_style": doc.get("cinematic_style", "cinematic realism"),
+            "narrative_arc": doc.get(
+                "narrative_arc", "setup -> conflict -> resolution"
+            ),
+            "color_grading": doc.get("color_grading", "filmic teal-orange"),
+        }
 
     def _self_critique_document(self, doc: Dict[str, Any]) -> Tuple[bool, List[str]]:
         ok, local_errors = self._validate_creative_document(doc)
@@ -234,17 +329,19 @@ class DirectorAgent:
             "No markdown, no explanations."
         )
         user_template = (
-            "Create a high-detail Creative Document JSON for cinematic video generation.\n"
+            "Create a high-detail Creative Document JSON for autonomous cinematic video generation on Wan2.2.\n"
+            "Break story into multiple contiguous scenes so each scene is roughly 10-12 seconds.\n"
+            "Extract and lock characters and sceneries for whole film to keep consistency.\n"
             "Use this schema exactly:\n"
             "{\n"
-            '  "characters": [{"id":"...","name":"...","visual_description":"..."}],\n'
-            '  "locations": [{"id":"...","name":"...","visual_description":"..."}],\n'
-            '  "scenes": [{"scene_id":"...","narrative_description":"...","character_ids":["..."],"location_id":"...","camera_style":"...","emotional_tone":"...","time_of_day":"...","weather":"..."}],\n'
+            '  "characters": [{"id":"...","name":"...","age":"...","gender":"...","wardrobe":"...","visual_description":"..."}],\n'
+            '  "locations": [{"id":"...","name":"...","scenery_type":"...","material_palette":"...","visual_description":"..."}],\n'
+            '  "scenes": [{"scene_id":"...","narrative_description":"...","scene_prompt":"...","character_ids":["..."],"location_id":"...","camera_style":"...","emotional_tone":"...","time_of_day":"...","weather":"...","continuity_constraints":"..."}],\n'
             '  "cinematic_style": "...",\n'
             '  "narrative_arc": "setup/conflict/resolution summary",\n'
             '  "color_grading": "..."\n'
             "}\n"
-            "Constraints: richly detailed character visual attributes, location attributes, coherent arc, scene ordering, no contradictions.\n"
+            "Constraints: richly detailed character age, gender, and wardrobe; rich scenery details for roads/rivers/buildings/schools where relevant; coherent arc; no contradictions.\n"
             "Seed prompt:\n"
             f"{seed_prompt}\n\n"
             "Current continuity state:\n"
@@ -260,7 +357,9 @@ class DirectorAgent:
                     "Fix these issues from previous attempt:\n- " + "\n- ".join(issues)
                 )
             response = self._call_llm(system, user_template + "\n" + augmentation)
-            candidate_doc = self._extract_json_block(response)
+            candidate_doc = self._normalize_creative_document(
+                self._extract_json_block(response)
+            )
             valid, issues = self._self_critique_document(candidate_doc)
             if valid:
                 return candidate_doc
@@ -322,7 +421,7 @@ class PromptEnricher:
             char = characters.get(cid)
             if char:
                 char_blocks.append(
-                    f"{char.get('name', cid)}: {char.get('visual_description', '')}"
+                    f"{char.get('name', cid)} | age={char.get('age', 'adult')} | gender={char.get('gender', 'unspecified')} | wardrobe={char.get('wardrobe', 'consistent outfit')} | visual={char.get('visual_description', '')}"
                 )
 
         loc = locations.get(scene.get("location_id"), {})
@@ -331,6 +430,8 @@ class PromptEnricher:
         base_prompt = (
             f"Scene ID: {scene.get('scene_id')}\n"
             f"Narrative: {scene.get('narrative_description')}\n"
+            f"Scene prompt: {scene.get('scene_prompt', scene.get('narrative_description', ''))}\n"
+            f"Continuity constraints: {scene.get('continuity_constraints', '')}\n"
             f"Camera style: {scene.get('camera_style')}\n"
             f"Emotional tone: {scene.get('emotional_tone')}\n"
             f"Time of day: {scene.get('time_of_day')}\n"
@@ -340,13 +441,13 @@ class PromptEnricher:
             f"Cinematic style: {creative_document.get('cinematic_style', '')}\n"
             f"Color grading: {creative_document.get('color_grading', '')}\n"
             f"Continuity memory: {memory_state}\n"
-            "Optimize for Wan2.1 T2V. Emphasize coherent composition, consistent appearance, and cinematic motion."
+            "Optimize for Wan2.2 T2V. Emphasize coherent composition, consistent character age/gender/wardrobe, stable scenery, and cinematic motion."
         )
 
         if self.director is None:
             return base_prompt
 
-        system = "You are a prompt engineer for Wan2.1 text-to-video. Return plain prompt text only."
+        system = "You are a prompt engineer for Wan2.2 text-to-video. Return plain prompt text only."
         user = (
             "Refine this scene spec into a high-fidelity generation prompt with concise, dense details:\n\n"
             + base_prompt

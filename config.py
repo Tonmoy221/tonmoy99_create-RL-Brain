@@ -20,7 +20,7 @@ IP_ADAPTER_SCALE = 0.7  # Conditioning scale for IP-Adapter image guidance
 LLM_PROVIDER = "openai"  # "openai" or "ollama"
 LLM_MODEL = "gpt-4o"  # LLM model name (e.g., "gpt-4o" or "llama3")
 REFERENCE_IMAGE_MODEL = "flux"  # "flux" or "sdxl" for reference generation
-VIDEO_MODEL = "wan2.1"  # Video model family used in this project
+VIDEO_MODEL = "wan2.2"  # Video model family used in this project
 
 # Paths
 OUTPUT_DIR = "./output"  # Root directory for generated outputs
@@ -70,6 +70,8 @@ PPO_LEARNING_RATE = RL_LEARNING_RATE  # PPO learning rate alias used by trainer 
 MAX_SCENES = 12  # Safety cap for number of scenes in a creative document
 MAX_CHARACTERS = 8  # Safety cap for number of characters in a creative document
 MAX_LOCATIONS = 8  # Safety cap for number of locations in a creative document
+MIN_SCENES = 3  # Minimum scene count for cinematic decomposition
+SCENE_SECONDS_TARGET = 10  # Target duration per generated clip
 
 # Report & persistence
 PRODUCTION_REPORT_NAME = "production_report.json"  # Production report file name

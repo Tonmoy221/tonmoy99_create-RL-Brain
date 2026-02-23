@@ -20,17 +20,22 @@ class ReferenceGenerator:
 
     def _build_character_prompts(self, character: Dict) -> List[str]:
         desc = character.get("visual_description", "")
+        age = character.get("age", "adult")
+        gender = character.get("gender", "unspecified")
+        wardrobe = character.get("wardrobe", "consistent outfit")
         return [
-            f"Ultra-detailed cinematic studio portrait front-facing of {character.get('name', 'character')}. {desc}. sharp details, realistic skin texture",
-            f"Ultra-detailed 3/4 angle cinematic portrait of {character.get('name', 'character')}. {desc}. dramatic soft lighting",
-            f"Full-body cinematic fashion shot of {character.get('name', 'character')}. {desc}. clear clothing silhouette, realistic anatomy",
+            f"Ultra-detailed cinematic studio portrait front-facing of {character.get('name', 'character')}, {age}, {gender}, wearing {wardrobe}. {desc}. sharp details, realistic skin texture",
+            f"Ultra-detailed 3/4 angle cinematic portrait of {character.get('name', 'character')}, {age}, {gender}, wardrobe: {wardrobe}. {desc}. dramatic soft lighting",
+            f"Full-body cinematic fashion shot of {character.get('name', 'character')}, {age}, {gender}, outfit locked as {wardrobe}. {desc}. clear clothing silhouette, realistic anatomy",
         ]
 
     def _build_location_prompts(self, location: Dict) -> List[str]:
         desc = location.get("visual_description", "")
+        scenery_type = location.get("scenery_type", "location")
+        material_palette = location.get("material_palette", "neutral")
         return [
-            f"Cinematic wide establishing shot of location {location.get('name', 'location')}. {desc}. high detail environment",
-            f"Cinematic texture and detail shot of location {location.get('name', 'location')}. {desc}. emphasis on materials and atmosphere",
+            f"Cinematic wide establishing shot of {scenery_type} {location.get('name', 'location')}. {desc}. maintain material palette: {material_palette}. high detail environment",
+            f"Cinematic texture and detail shot of {scenery_type} {location.get('name', 'location')}. {desc}. emphasize materials and atmosphere with palette {material_palette}",
         ]
 
     def _load_image_pipeline(self):

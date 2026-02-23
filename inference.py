@@ -6,13 +6,10 @@ import time
 from typing import Dict, List, Tuple
 
 import torch
-from PIL import Image
 
 from agent import DirectorAgent
 from config import (
     CLIPS_DIR,
-    DEFAULT_NEGATIVE_PROMPT,
-    DEFAULT_NUM_FRAMES,
     MEMORY_DIR,
     MIN_VRAM_GB,
     OUTPUT_DIR,
@@ -23,51 +20,6 @@ from preproduction import ReferenceGenerator
 from reward_model import RewardModel
 from scene_pipeline import SceneGenerator
 from stitcher import VideoStitcher
-from utils.data import save_video
-from wan_video_new import ModelConfig, WanVideoPipeline
-
-
-def _build_model_configs() -> Tuple[List[ModelConfig], ModelConfig]:
-    model_root = os.getenv("WAN_MODEL_ROOT", "./models")
-    diffusion_model = os.getenv(
-        "WAN_DIFFUSION_MODEL",
-        os.path.join(model_root, "PAI", "Wan2.1-Fun-V1.1-1.3B-InP"),
-    )
-    t5_path = os.getenv(
-        "WAN_T5_PATH",
-        os.path.join(
-            model_root, "Wan-AI", "Wan2.1-T2V-1.3B", "models_t5_umt5-xxl-enc-bf16.pth"
-        ),
-    )
-    vae_path = os.getenv(
-        "WAN_VAE_PATH",
-        os.path.join(model_root, "Wan-AI", "Wan2.1-T2V-1.3B", "Wan2.1_VAE.pth"),
-    )
-    clip_path = os.getenv(
-        "WAN_CLIP_PATH",
-        os.path.join(
-            model_root,
-            "Wan-AI",
-            "Wan2.1-I2V-14B-480P",
-            "models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth",
-        ),
-    )
-    tokenizer_path = os.getenv(
-        "WAN_TOKENIZER_PATH",
-        os.path.join(model_root, "Wan-AI", "Wan2.1-T2V-1.3B", "google", "umt5-xxl"),
-    )
-
-    configs = [
-        ModelConfig(
-            model_id=diffusion_model,
-            origin_file_pattern="diffusion_pytorch_model.safetensors",
-        ),
-        ModelConfig(path=t5_path),
-        ModelConfig(path=vae_path),
-        ModelConfig(path=clip_path),
-    ]
-    tokenizer = ModelConfig(path=tokenizer_path)
-    return configs, tokenizer
 
 
 def _check_vram() -> float:
@@ -124,43 +76,9 @@ def _collect_refs(scene: Dict, creative_document: Dict) -> Tuple[List[str], List
     return list(character_refs), list(location_refs)
 
 
-def run_simple_mode(prompt: str, output_root: str, image_path: str) -> str:
-    pipe = None
-    try:
-        model_configs, tokenizer_config = _build_model_configs()
-        pipe = WanVideoPipeline.from_pretrained(
-            torch_dtype=torch.float16,
-            device="cuda" if torch.cuda.is_available() else "cpu",
-            model_configs=model_configs,
-            tokenizer_config=tokenizer_config,
-        )
-
-        image = Image.open(image_path).convert("RGB")
-        video_frames = pipe(
-            prompt=prompt,
-            negative_prompt=DEFAULT_NEGATIVE_PROMPT,
-            input_image=image,
-            seed=0,
-            tiled=True,
-            num_frames=DEFAULT_NUM_FRAMES,
-        )
-
-        out_path = os.path.join(output_root, OUTPUT_DIR, "simple_video.mp4")
-        os.makedirs(os.path.dirname(out_path), exist_ok=True)
-        save_video(video_frames, out_path, fps=15, quality=5)
-        return out_path
-    except Exception as exc:
-        raise RuntimeError(f"Simple mode failed: {exc}") from exc
-    finally:
-        if pipe is not None:
-            del pipe
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-
-
 def run_cinematic_mode(seed_prompt: str, output_root: str) -> str:
     print("=" * 80)
-    print("RL CINEMATIC VIDEO GENERATION SYSTEM")
+    print("RL CINEMATIC VIDEO GENERATION SYSTEM (WAN2.2)")
     print("=" * 80)
 
     _check_vram()
@@ -220,6 +138,10 @@ def run_cinematic_mode(seed_prompt: str, output_root: str) -> str:
             if cid is None:
                 continue
             memory.character_registry[str(cid)] = {
+                "name": character.get("name", ""),
+                "age": character.get("age", "adult"),
+                "gender": character.get("gender", "unspecified"),
+                "wardrobe": character.get("wardrobe", "consistent outfit"),
                 "text_description": character.get("visual_description", ""),
                 "reference_image_paths": character.get("reference_image_paths", []),
                 "clip_embedding": None,
@@ -230,6 +152,9 @@ def run_cinematic_mode(seed_prompt: str, output_root: str) -> str:
             if lid is None:
                 continue
             memory.location_registry[str(lid)] = {
+                "name": location.get("name", ""),
+                "scenery_type": location.get("scenery_type", "environment"),
+                "material_palette": location.get("material_palette", "neutral tones"),
                 "text_description": location.get("visual_description", ""),
                 "reference_image_paths": location.get("reference_image_paths", []),
                 "clip_embedding": None,
@@ -262,7 +187,9 @@ def run_cinematic_mode(seed_prompt: str, output_root: str) -> str:
         try:
             clip_path = scene_generator.generate_scene(scene, memory, creative_document)
             character_refs, location_refs = _collect_refs(scene, creative_document)
-            used_prompt = scene.get("narrative_description", seed_prompt)
+            used_prompt = scene.get(
+                "scene_prompt", scene.get("narrative_description", seed_prompt)
+            )
 
             reward = reward_model.compute(
                 scene_id=scene_id,
@@ -339,13 +266,7 @@ def run_cinematic_mode(seed_prompt: str, output_root: str) -> str:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Wan2.1 video launcher with simple and RL-cinematic modes"
-    )
-    parser.add_argument(
-        "--mode",
-        choices=["simple", "cinematic"],
-        default="simple",
-        help="simple=original path, cinematic=RL pipeline",
+        description="Wan2.2 video launcher in RL-cinematic mode"
     )
     parser.add_argument(
         "--prompt",
@@ -356,26 +277,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output", type=str, default=".", help="Project root/output base directory"
     )
-    parser.add_argument(
-        "--image",
-        type=str,
-        default="test_image.png",
-        help="Input image for simple mode",
-    )
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
     try:
-        if args.mode == "simple":
-            out = run_simple_mode(
-                prompt=args.prompt, output_root=args.output, image_path=args.image
-            )
-            print(f"Simple mode output: {out}")
-        else:
-            out = run_cinematic_mode(seed_prompt=args.prompt, output_root=args.output)
-            print(f"Cinematic mode output: {out}")
+        out = run_cinematic_mode(seed_prompt=args.prompt, output_root=args.output)
+        print(f"Cinematic mode output: {out}")
         return 0
     except Exception as exc:
         print(f"[FATAL] {exc}")

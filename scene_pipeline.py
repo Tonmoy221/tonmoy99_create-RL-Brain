@@ -13,6 +13,8 @@ from config import (
     DEFAULT_WIDTH,
     IP_ADAPTER_SCALE,
     RL_EPISODES_PER_SCENE,
+    SCENE_SECONDS_TARGET,
+    VIDEO_MODEL,
     VIDEO_FPS,
 )
 from utils.data import save_video
@@ -34,33 +36,33 @@ class SceneGenerator:
         model_root = os.getenv("WAN_MODEL_ROOT", "./models")
         diffusion_model = os.getenv(
             "WAN_DIFFUSION_MODEL",
-            os.path.join(model_root, "PAI", "Wan2.1-Fun-V1.1-1.3B-InP"),
+            os.path.join(model_root, "PAI", "Wan2.2-Fun-V1.1-InP"),
         )
         t5_path = os.getenv(
             "WAN_T5_PATH",
             os.path.join(
                 model_root,
                 "Wan-AI",
-                "Wan2.1-T2V-1.3B",
+                "Wan2.2-T2V",
                 "models_t5_umt5-xxl-enc-bf16.pth",
             ),
         )
         vae_path = os.getenv(
             "WAN_VAE_PATH",
-            os.path.join(model_root, "Wan-AI", "Wan2.1-T2V-1.3B", "Wan2.1_VAE.pth"),
+            os.path.join(model_root, "Wan-AI", "Wan2.2-T2V", "Wan2.2_VAE.pth"),
         )
         clip_path = os.getenv(
             "WAN_CLIP_PATH",
             os.path.join(
                 model_root,
                 "Wan-AI",
-                "Wan2.1-I2V-14B-480P",
+                "Wan2.2-I2V",
                 "models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth",
             ),
         )
         tokenizer_path = os.getenv(
             "WAN_TOKENIZER_PATH",
-            os.path.join(model_root, "Wan-AI", "Wan2.1-T2V-1.3B", "google", "umt5-xxl"),
+            os.path.join(model_root, "Wan-AI", "Wan2.2-T2V", "google", "umt5-xxl"),
         )
 
         configs = [
@@ -182,7 +184,13 @@ class SceneGenerator:
 
         character_refs, location_refs = self._collect_refs(scene, creative_document)
         memory_state = memory.get_state_for_agent()
-        prompt = self.prompt_enricher.enrich(scene, creative_document, memory_state)
+        scene_payload = dict(scene)
+        scene_payload["narrative_description"] = scene.get(
+            "scene_prompt", scene.get("narrative_description", "")
+        )
+        prompt = self.prompt_enricher.enrich(
+            scene_payload, creative_document, memory_state
+        )
 
         retry_count = 0
         while retry_count < RL_EPISODES_PER_SCENE:
@@ -201,7 +209,9 @@ class SceneGenerator:
                     input_image=first_frame,
                     reference_image=ip_adapter_image,
                     control_video=controlnet_video,
-                    num_frames=DEFAULT_NUM_FRAMES,
+                    num_frames=max(
+                        DEFAULT_NUM_FRAMES, SCENE_SECONDS_TARGET * VIDEO_FPS
+                    ),
                     height=DEFAULT_HEIGHT,
                     width=DEFAULT_WIDTH,
                     seed=0,
@@ -231,7 +241,8 @@ class SceneGenerator:
                     ) from exc
                 retry_count += 1
                 prompt = (
-                    prompt + " Ensure clean composition and strict identity continuity."
+                    prompt
+                    + f" Ensure clean composition and strict identity continuity for {VIDEO_MODEL}."
                 )
             finally:
                 if pipe is not None:
