@@ -86,6 +86,40 @@ For each scene clip:
 ### Run
 - `python inference.py --prompt "Your cinematic story prompt" --output .`
 
+### Run LLM-only pipeline (new, separate)
+This is a separate pipeline that keeps the RL/WAN pipeline untouched. It uses an LLM agent to:
+- Generate creative document
+- Refine scene prompts
+- Critique and revise prompts
+- Save planning artifacts for downstream generation
+
+Run:
+- `python llm_pipeline.py --prompt "Your cinematic story prompt" --output .`
+
+Optional:
+- `python llm_pipeline.py --prompt "Your cinematic story prompt" --output . --provider openai --model gpt-4o`
+- `python llm_pipeline.py --prompt "Your cinematic story prompt" --output . --resume`
+
+Artifacts:
+- `output/llm_only/scene_prompts_llm.json`
+- `output/llm_only/llm_pipeline_report.json`
+- `story_bible/llm_only/creative_document_llm.json`
+- `memory_llm/state_llm.json`
+
+### Kaggle smoke test (before WAN generation)
+Use this to verify the agent/planner/PPO/memory loop is functioning before spending GPU time on WAN video generation.
+
+- Install and setup as above
+- Set API key if using OpenAI mode: `export OPENAI_API_KEY="your_key"`
+- Run smoke test only:
+  - `python kaggle_smoke_test.py --output-root /kaggle/working`
+- If you only want PPO + memory checks without LLM planning:
+  - `python kaggle_smoke_test.py --output-root /kaggle/working --skip-creative-doc`
+
+Expected artifacts:
+- `/kaggle/working/memory/state.json`
+- `/kaggle/working/kaggle_smoke_test_report.json`
+
 ### Resume
 If `memory/state.json` exists, the launcher asks whether to resume.
 
