@@ -134,10 +134,36 @@ class LLMDirectorAgent:
             if extra_headers:
                 request_kwargs["extra_headers"] = extra_headers
 
-            response = client.chat.completions.create(
-                **request_kwargs,
-            )
-            return response.choices[0].message.content or ""
+            def _send(messages: List[Dict[str, str]]) -> str:
+                payload = dict(request_kwargs)
+                payload["messages"] = messages
+                response = client.chat.completions.create(**payload)
+                return response.choices[0].message.content or ""
+
+            try:
+                return _send(
+                    [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ]
+                )
+            except Exception as first_exc:
+                text = str(first_exc).lower()
+                needs_no_system_retry = (
+                    "developer instruction is not enabled" in text
+                    or "system" in text
+                    and "invalid_argument" in text
+                )
+                if not needs_no_system_retry:
+                    raise
+
+                merged_user_prompt = (
+                    "Follow these instructions exactly:\n"
+                    f"{system_prompt}\n\n"
+                    "User request:\n"
+                    f"{user_prompt}"
+                )
+                return _send([{"role": "user", "content": merged_user_prompt}])
         except Exception as exc:
             raise RuntimeError(f"OpenAI call failed: {exc}") from exc
 
