@@ -97,9 +97,17 @@ class LLMDirectorAgent:
         self.provider = provider
         self.model_name = model_name
 
+    # ── Retry settings for free-tier rate limits ──
+    _RATE_MAX_RETRIES = 8
+    _RATE_BASE_DELAY = 15  # seconds
+    _RATE_MAX_DELAY = 120  # seconds
+
     def _call_openai(self, system_prompt: str, user_prompt: str) -> str:
+        import time
+        import random
+
         try:
-            from openai import OpenAI
+            from openai import OpenAI, RateLimitError as _OAIRateLimit
 
             api_key = os.getenv(OPENAI_API_KEY_ENV)
             if not api_key:
@@ -123,47 +131,60 @@ class LLMDirectorAgent:
             if x_title:
                 extra_headers["X-Title"] = x_title
 
-            request_kwargs: Dict[str, Any] = {
-                "model": self.model_name,
-                "temperature": 0.4,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-            }
-            if extra_headers:
-                request_kwargs["extra_headers"] = extra_headers
+            # Build two possible message lists
+            msgs_system = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ]
+            merged_user_prompt = (
+                "Follow these instructions exactly:\n"
+                f"{system_prompt}\n\n"
+                "User request:\n"
+                f"{user_prompt}"
+            )
+            msgs_user_only = [{"role": "user", "content": merged_user_prompt}]
 
-            def _send(messages: List[Dict[str, str]]) -> str:
-                payload = dict(request_kwargs)
-                payload["messages"] = messages
-                response = client.chat.completions.create(**payload)
-                return response.choices[0].message.content or ""
+            use_system = True  # start by trying system+user
 
-            try:
-                return _send(
-                    [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt},
-                    ]
-                )
-            except Exception as first_exc:
-                text = str(first_exc).lower()
-                needs_no_system_retry = (
-                    "developer instruction is not enabled" in text
-                    or "system" in text
-                    and "invalid_argument" in text
-                )
-                if not needs_no_system_retry:
+            for attempt in range(1, self._RATE_MAX_RETRIES + 1):
+                messages = msgs_system if use_system else msgs_user_only
+                try:
+                    response = client.chat.completions.create(
+                        model=self.model_name,
+                        temperature=0.4,
+                        messages=messages,
+                        extra_headers=extra_headers if extra_headers else None,
+                    )
+                    return response.choices[0].message.content or ""
+
+                except _OAIRateLimit:
+                    # 429 – wait with exponential backoff + jitter then retry
+                    delay = min(
+                        self._RATE_BASE_DELAY * (2 ** (attempt - 1)),
+                        self._RATE_MAX_DELAY,
+                    ) + random.uniform(0, 5)
+                    print(
+                        f"  [RATE-LIMIT] attempt {attempt}/{self._RATE_MAX_RETRIES}, "
+                        f"sleeping {delay:.1f}s …"
+                    )
+                    time.sleep(delay)
+
+                except Exception as exc:
+                    text = str(exc).lower()
+                    if (
+                        "developer instruction is not enabled" in text
+                        or ("system" in text and "invalid_argument" in text)
+                    ) and use_system:
+                        # Switch to user-only messages and retry immediately
+                        print("  [FALLBACK] system role rejected → user-only messages")
+                        use_system = False
+                        continue
                     raise
 
-                merged_user_prompt = (
-                    "Follow these instructions exactly:\n"
-                    f"{system_prompt}\n\n"
-                    "User request:\n"
-                    f"{user_prompt}"
-                )
-                return _send([{"role": "user", "content": merged_user_prompt}])
+            raise RuntimeError(
+                f"OpenRouter rate-limited after {self._RATE_MAX_RETRIES} retries. "
+                "Wait a few minutes and retry."
+            )
         except Exception as exc:
             raise RuntimeError(f"OpenAI call failed: {exc}") from exc
 
