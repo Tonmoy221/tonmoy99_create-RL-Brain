@@ -186,7 +186,7 @@ class LocalLLM:
         self,
         model_name_or_path: str = PPO_POLICY_MODEL_NAME,
         device: Optional[str] = None,
-        max_new_tokens: int = 1024,
+        max_new_tokens: int = 512,
         temperature: float = 0.4,
         do_sample: bool = True,
     ):
@@ -206,10 +206,47 @@ class LocalLLM:
         )
         print("[LocalLLM] Model loaded.")
 
+        # ── Detect model's maximum context length ─────────────────────────────
+        tokenizer = self._pipe.tokenizer
+        self._max_model_len: int = (
+            getattr(tokenizer, "model_max_length", None)
+            or getattr(self._pipe.model.config, "max_position_embeddings", None)
+            or getattr(self._pipe.model.config, "n_positions", None)
+            or 2048
+        )
+        # Cap at a sane value — some tokenizers report absurdly large numbers
+        if self._max_model_len > 32768:
+            self._max_model_len = 2048
+        # Reserve room for generated tokens
+        self._max_input_tokens: int = max(
+            64, self._max_model_len - self.max_new_tokens - 8
+        )
+        print(
+            f"[LocalLLM] context_len={self._max_model_len}  "
+            f"max_input_tokens={self._max_input_tokens}  "
+            f"max_new_tokens={self.max_new_tokens}"
+        )
+
+    def _truncate_prompt(self, prompt: str) -> str:
+        """Tokenise prompt and truncate from the LEFT if it exceeds max_input_tokens.
+        Left-truncation keeps the most recent / relevant instructions for the model.
+        """
+        tokenizer = self._pipe.tokenizer
+        ids = tokenizer.encode(prompt, add_special_tokens=False)
+        if len(ids) <= self._max_input_tokens:
+            return prompt
+        # Keep the last max_input_tokens tokens (right side = most recent context)
+        ids = ids[-self._max_input_tokens :]
+        truncated = tokenizer.decode(ids, skip_special_tokens=False)
+        print(f"  [LocalLLM] Prompt truncated: {len(ids)} tokens (was longer)")
+        return truncated
+
     def __call__(self, system_prompt: str, user_prompt: str) -> str:
         """
         Formats a system + user turn using the tokenizer's chat template if available,
         otherwise falls back to a plain concatenated prompt.
+        Truncates to the model's context window before inference to prevent CUDA
+        out-of-range token errors.
         Returns the model's reply as a plain string.
         """
         tokenizer = self._pipe.tokenizer
@@ -240,6 +277,9 @@ class LocalLLM:
                 f"### Assistant\n"
             )
 
+        # ── Truncate to fit within the model's context window ─────────────────
+        prompt = self._truncate_prompt(prompt)
+
         outputs = self._pipe(
             prompt,
             max_new_tokens=self.max_new_tokens,
@@ -247,6 +287,7 @@ class LocalLLM:
             do_sample=self.do_sample,
             pad_token_id=tokenizer.eos_token_id,
             return_full_text=False,  # return only the generated part
+            truncation=True,  # safety net at the pipeline level
         )
         return outputs[0]["generated_text"].strip()
 
