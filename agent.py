@@ -315,15 +315,94 @@ class DirectorAgent:
     # ─────────────────────────────────────────────────────────────────────────
 
     @staticmethod
+    def _repair_json(text: str) -> str:
+        """
+        Best-effort repair of JSON strings produced by small LLMs.
+        Handles the most common failure modes:
+          - Trailing commas before } or ]
+          - Single-quoted strings
+          - Missing closing braces / brackets (truncated output)
+          - Control characters inside strings
+        """
+        import re as _re
+
+        # 1. Remove trailing commas before closing brace/bracket
+        text = _re.sub(r",\s*([}\]])", r"\1", text)
+
+        # 2. Replace smart/curly quotes with straight quotes
+        for ch, repl in [("‘", "'"), ("’", "'"), ("“", '"'), ("”", '"')]:
+            text = text.replace(ch, repl)
+
+        # 3. Strip literal control characters (but not \n inside strings)
+        text = _re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", text)
+
+        # 4. Balance unclosed braces / brackets (truncated output from small models)
+        opens = text.count("{") - text.count("}")
+        opens_b = text.count("[") - text.count("]")
+        if opens > 0 or opens_b > 0:
+            # Strip any trailing comma before we close
+            text = text.rstrip().rstrip(",")
+            text += "]" * max(opens_b, 0) + "}" * max(opens, 0)
+
+        return text
+
+    @staticmethod
     def _extract_json_block(text: str) -> Dict[str, Any]:
+        """Extract and parse the first JSON object from LLM output.
+        Tries multiple strategies and applies _repair_json before giving up."""
         text = text.strip()
-        code_block = re.search(r"```json\s*(\{.*\})\s*```", text, flags=re.DOTALL)
+
+        # Strategy 1 – fenced ```json ... ``` block
+        code_block = re.search(r"```json\s*(\{.*?\})\s*```", text, flags=re.DOTALL)
         if code_block:
-            return json.loads(code_block.group(1))
-        raw_json = re.search(r"(\{.*\})", text, flags=re.DOTALL)
-        if raw_json:
-            return json.loads(raw_json.group(1))
-        return json.loads(text)
+            candidate = code_block.group(1)
+            try:
+                return json.loads(candidate)
+            except json.JSONDecodeError:
+                try:
+                    return json.loads(DirectorAgent._repair_json(candidate))
+                except json.JSONDecodeError:
+                    pass  # fall through to next strategy
+
+        # Strategy 2 – any fenced block (no language tag)
+        any_block = re.search(r"```[a-z]*\s*(\{.*?\})\s*```", text, flags=re.DOTALL)
+        if any_block:
+            candidate = any_block.group(1)
+            try:
+                return json.loads(candidate)
+            except json.JSONDecodeError:
+                try:
+                    return json.loads(DirectorAgent._repair_json(candidate))
+                except json.JSONDecodeError:
+                    pass
+
+        # Strategy 3 – first { … } span in the text (greedy)
+        raw_match = re.search(r"(\{.*\})", text, flags=re.DOTALL)
+        if raw_match:
+            candidate = raw_match.group(1)
+            try:
+                return json.loads(candidate)
+            except json.JSONDecodeError:
+                repaired = DirectorAgent._repair_json(candidate)
+                try:
+                    return json.loads(repaired)
+                except json.JSONDecodeError:
+                    pass
+
+        # Strategy 4 – repair the whole text and try
+        repaired = DirectorAgent._repair_json(text)
+        try:
+            return json.loads(repaired)
+        except json.JSONDecodeError:
+            pass
+
+        # Nothing worked — raise with contextual info
+        raise json.JSONDecodeError(
+            f"Could not parse JSON from LLM output (len={len(text)}). "
+            "Check LOCAL_MODEL_NAME — larger models produce more reliable JSON.",
+            text,
+            0,
+        )
 
     # ─────────────────────────────────────────────────────────────────────────
     # Validation
@@ -671,12 +750,24 @@ class DirectorAgent:
                     "Fix these issues from previous attempt:\n- " + "\n- ".join(issues)
                 )
             response = self._call_llm(system, user_template + "\n" + augmentation)
-            candidate_doc = self._normalize_creative_document(
-                self._extract_json_block(response)
-            )
+            try:
+                parsed = self._extract_json_block(response)
+            except (json.JSONDecodeError, ValueError) as exc:
+                # Malformed JSON from a small/quantised model — treat as an issue and retry
+                issues = [
+                    f"JSON parse error: {exc}",
+                    "Output must be a single valid JSON object.",
+                    "Do NOT write any text before or after the JSON.",
+                ]
+                continue
+            candidate_doc = self._normalize_creative_document(parsed)
             valid, issues = self._self_critique_document(candidate_doc)
             if valid:
                 return candidate_doc
+
+        # If we have a partial (non-empty) document, return it rather than crashing
+        if candidate_doc and candidate_doc.get("scenes"):
+            return candidate_doc
 
         raise RuntimeError(
             f"Failed to generate valid Creative Document after retries. Last issues: {issues}"
