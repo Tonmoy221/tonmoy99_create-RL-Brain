@@ -55,10 +55,19 @@ class LLMRunMemory:
         return True
 
     def get_state_for_agent(self) -> str:
-        character_summary = [
-            f"{key}: {value.get('name', key)} | wardrobe={value.get('wardrobe', '')}"
-            for key, value in self.character_registry.items()
-        ]
+        character_summary = []
+        for key, value in self.character_registry.items():
+            appearance = (
+                f"skin={value.get('skin_tone', '')} | "
+                f"body={value.get('body_type', '')} | "
+                f"height={value.get('height', '')} | "
+                f"hair={value.get('hair_color', '')} {value.get('hair_style', '')} | "
+                f"eyes={value.get('eye_color', '')} | "
+                f"expression={value.get('facial_expression', '')} | "
+                f"wardrobe={value.get('wardrobe', '')} | "
+                f"features={value.get('distinguishing_features', '')}"
+            )
+            character_summary.append(f"{key}: {value.get('name', key)} | {appearance}")
         location_summary = [
             f"{key}: {value.get('name', key)} | palette={value.get('material_palette', '')}"
             for key, value in self.location_registry.items()
@@ -309,6 +318,24 @@ class LLMDirectorAgent:
                     "name": item.get("name", f"Character {index + 1}"),
                     "age": item.get("age", "adult"),
                     "gender": item.get("gender", "unspecified"),
+                    # ── Detailed physical appearance ──
+                    "skin_tone": item.get("skin_tone", "medium"),
+                    "body_type": item.get(
+                        "body_type", "average"
+                    ),  # slim/athletic/average/heavyset/muscular
+                    "height": item.get(
+                        "height", "average height"
+                    ),  # e.g. "5ft 10in, tall"
+                    "hair_color": item.get("hair_color", "brown"),
+                    "hair_style": item.get("hair_style", "medium length"),
+                    "eye_color": item.get("eye_color", "brown"),
+                    "facial_expression": item.get(
+                        "facial_expression", "neutral"
+                    ),  # happy/sad/angry/determined/scared
+                    "distinguishing_features": item.get(
+                        "distinguishing_features", ""
+                    ),  # scars, tattoos, beard, glasses
+                    # ── Wardrobe & full visual summary ──
                     "wardrobe": item.get("wardrobe", "consistent outfit"),
                     "visual_description": item.get("visual_description", ""),
                     "reference_image_paths": item.get("reference_image_paths", []),
@@ -367,6 +394,47 @@ class LLMDirectorAgent:
             "color_grading": doc.get("color_grading", "filmic teal-orange"),
         }
 
+    @staticmethod
+    def _build_scene_character_assignments(
+        scene: Dict[str, Any],
+        characters: Dict[str, Dict[str, Any]],
+    ) -> Dict[str, str]:
+        """
+        Assign a stable per-scene number to each character that appears in a scene.
+        Returns a mapping like {"char_1": "Character_1", "char_2": "Character_2"}.
+        This prevents multi-character prompt clashes across scenes.
+        """
+        assignments: Dict[str, str] = {}
+        for slot_idx, cid in enumerate(scene.get("character_ids", []), start=1):
+            if cid in characters:
+                assignments[cid] = f"Character_{slot_idx}"
+        return assignments
+
+    @staticmethod
+    def _format_character_block(
+        char: Dict[str, Any],
+        label: str,
+    ) -> str:
+        """
+        Produce a verbose, locked character description block for prompt injection.
+        The `label` is the scene-local numbered alias e.g. 'Character_1'.
+        """
+        lines = [
+            f"[{label} | ID={char.get('id')} | Name={char.get('name', label)}]",
+            f"  Gender      : {char.get('gender', 'unspecified')}",
+            f"  Age         : {char.get('age', 'adult')}",
+            f"  Skin tone   : {char.get('skin_tone', 'medium')}",
+            f"  Body type   : {char.get('body_type', 'average')}",
+            f"  Height      : {char.get('height', 'average height')}",
+            f"  Hair        : {char.get('hair_color', 'brown')} | {char.get('hair_style', 'medium length')}",
+            f"  Eye color   : {char.get('eye_color', 'brown')}",
+            f"  Expression  : {char.get('facial_expression', 'neutral')}",
+            f"  Features    : {char.get('distinguishing_features', 'none')}",
+            f"  Wardrobe    : {char.get('wardrobe', 'consistent outfit')}",
+            f"  Full desc.  : {char.get('visual_description', '')}",
+        ]
+        return "\n".join(lines)
+
     def generate_creative_document(
         self, seed_prompt: str, memory_state: str
     ) -> Dict[str, Any]:
@@ -378,13 +446,47 @@ class LLMDirectorAgent:
             "Create a high-detail Creative Document JSON for cinematic planning.\n"
             "Use this schema exactly:\n"
             "{\n"
-            '  "characters": [{"id":"...","name":"...","age":"...","gender":"...","wardrobe":"...","visual_description":"..."}],\n'
+            '  "characters": [\n'
+            "    {\n"
+            '      "id": "char_1",\n'
+            '      "name": "Full character name",\n'
+            '      "age": "e.g. 28",\n'
+            '      "gender": "male | female | non-binary",\n'
+            '      "skin_tone": "e.g. fair, medium olive, dark brown, pale",\n'
+            '      "body_type": "slim | athletic | average | heavyset | muscular",\n'
+            '      "height": "e.g. 5ft 8in, tall, short",\n'
+            '      "hair_color": "e.g. jet black, sandy blonde, dark red",\n'
+            '      "hair_style": "e.g. short cropped, long wavy, curly shoulder-length",\n'
+            '      "eye_color": "e.g. hazel, deep brown, pale blue",\n'
+            '      "facial_expression": "e.g. determined, anxious, joyful, cold",\n'
+            '      "distinguishing_features": "e.g. scar on left cheek, thick beard, round glasses",\n'
+            '      "wardrobe": "detailed clothing description locked across all scenes",\n'
+            '      "visual_description": "one complete sentence summarising full physical appearance"\n'
+            "    }\n"
+            "  ],\n"
             '  "locations": [{"id":"...","name":"...","scenery_type":"...","material_palette":"...","visual_description":"..."}],\n'
-            '  "scenes": [{"scene_id":"...","narrative_description":"...","scene_prompt":"...","character_ids":["..."],"location_id":"...","camera_style":"...","emotional_tone":"...","time_of_day":"...","weather":"...","continuity_constraints":"..."}],\n'
+            '  "scenes": [\n'
+            "    {\n"
+            '      "scene_id": "scene_1",\n'
+            '      "narrative_description": "...",\n'
+            '      "scene_prompt": "...",\n'
+            '      "character_ids": ["char_1"],\n'
+            '      "location_id": "loc_1",\n'
+            '      "camera_style": "...",\n'
+            '      "emotional_tone": "...",\n'
+            '      "time_of_day": "...",\n'
+            '      "weather": "...",\n'
+            '      "continuity_constraints": "..."\n'
+            "    }\n"
+            "  ],\n"
             '  "cinematic_style": "...",\n'
             '  "narrative_arc": "setup/conflict/resolution summary",\n'
             '  "color_grading": "..."\n'
-            "}\n"
+            "}\n\n"
+            "IMPORTANT RULES:\n"
+            "- Every character MUST have a complete, specific physical description.\n"
+            "- Do NOT use vague terms like 'attractive' or 'ordinary'; be concrete and visual.\n"
+            "- Keep character appearance IDENTICAL across every scene they appear in.\n"
             f"Seed prompt:\n{seed_prompt}\n\n"
             f"Current continuity state:\n{memory_state}\n"
         )
@@ -431,18 +533,41 @@ class LLMDirectorAgent:
             if "id" in item
         }
 
-        char_lines: List[str] = []
+        # ── Assign per-scene numbered labels for every character in this scene ──
+        # e.g. Character_1, Character_2 … to avoid confusion when multiple characters exist.
+        scene_char_assignments = self._build_scene_character_assignments(
+            scene, characters
+        )
+
+        char_blocks: List[str] = []
         for cid in scene.get("character_ids", []):
             char = characters.get(cid)
             if not char:
                 continue
-            char_lines.append(
-                f"{char.get('name', cid)} | age={char.get('age', 'adult')} | gender={char.get('gender', 'unspecified')} | wardrobe={char.get('wardrobe', 'consistent outfit')} | visual={char.get('visual_description', '')}"
-            )
+            label = scene_char_assignments.get(cid, cid)
+            char_blocks.append(self._format_character_block(char, label))
 
         location = locations.get(scene.get("location_id"), {})
+
+        # Build a numbered-character reference note for the LLM
+        char_alias_note = ""
+        if scene_char_assignments:
+            alias_list = ", ".join(
+                f"{label} (= {characters[cid].get('name', cid)})"
+                for cid, label in scene_char_assignments.items()
+                if cid in characters
+            )
+            char_alias_note = (
+                f"Character aliases for this scene: {alias_list}\n"
+                "When writing the prompt, refer to each character by their alias "
+                "(Character_1, Character_2, …) so that they remain uniquely identifiable "
+                "and do not visually clash with each other.\n"
+            )
+
         user = (
-            "Refine this into one high-fidelity scene prompt with continuity lock:\n\n"
+            "Refine this into one high-fidelity scene prompt with continuity lock.\n"
+            "Use the exact per-scene character numbers/aliases in the prompt text so every "
+            "character is unambiguous and visually distinct from the others.\n\n"
             f"Scene ID: {scene.get('scene_id')}\n"
             f"Narrative: {scene.get('narrative_description', '')}\n"
             f"Base prompt: {scene.get('scene_prompt', '')}\n"
@@ -450,9 +575,13 @@ class LLMDirectorAgent:
             f"Emotional tone: {scene.get('emotional_tone', '')}\n"
             f"Time of day: {scene.get('time_of_day', '')}\n"
             f"Weather: {scene.get('weather', '')}\n"
-            f"Continuity constraints: {scene.get('continuity_constraints', '')}\n"
-            f"Characters: {' || '.join(char_lines) if char_lines else 'None'}\n"
-            f"Location: {location.get('name', scene.get('location_id', 'unknown'))} | {location.get('visual_description', '')}\n"
+            f"Continuity constraints: {scene.get('continuity_constraints', '')}\n\n"
+            + char_alias_note
+            + "── CHARACTER APPEARANCE LOCKS (must be honoured exactly) ──\n"
+            + ("\n\n".join(char_blocks) if char_blocks else "None")
+            + "\n\n"
+            f"Location: {location.get('name', scene.get('location_id', 'unknown'))} | "
+            f"{location.get('visual_description', '')}\n"
             f"Cinematic style: {creative_document.get('cinematic_style', '')}\n"
             f"Color grading: {creative_document.get('color_grading', '')}\n"
             f"Memory state: {memory_state}\n"
@@ -471,8 +600,11 @@ class LLMDirectorAgent:
             "You are a strict cinematic continuity critic. Return strict JSON only."
         )
         user = (
-            'Return JSON: {"score":0.0-1.0, "accept":bool, "issues":[str], "revised_prompt":"..."}.\n'
-            "Evaluate this scene prompt for character consistency, location consistency, and narrative continuity.\n"
+            'Return JSON: {"score":0.0-1.0, "accept":bool, "issues":[str], "revised_prompt":"..."}\n'
+            "Evaluate this scene prompt for:\n"
+            "1. Character physical appearance consistency (skin tone, body type, height, hair, eyes, expression).\n"
+            "2. Character identity consistency (each character has a unique numbered alias).\n"
+            "3. Location consistency and narrative continuity.\n"
             f"Scene metadata: {json.dumps(scene, ensure_ascii=False)}\n"
             f"Scene prompt: {scene_prompt}\n"
             f"Cinematic style: {creative_document.get('cinematic_style', '')}\n"
@@ -555,12 +687,24 @@ def run_llm_pipeline(
         memory_state=memory.get_state_for_agent(),
     )
 
+    # ── Persist full character appearance in memory registry ──
     for character in creative_document.get("characters", []):
         cid = str(character.get("id", ""))
         if cid:
             memory.character_registry[cid] = {
                 "name": character.get("name", ""),
+                "gender": character.get("gender", "unspecified"),
+                "age": character.get("age", "adult"),
+                "skin_tone": character.get("skin_tone", ""),
+                "body_type": character.get("body_type", ""),
+                "height": character.get("height", ""),
+                "hair_color": character.get("hair_color", ""),
+                "hair_style": character.get("hair_style", ""),
+                "eye_color": character.get("eye_color", ""),
+                "facial_expression": character.get("facial_expression", ""),
+                "distinguishing_features": character.get("distinguishing_features", ""),
                 "wardrobe": character.get("wardrobe", ""),
+                "visual_description": character.get("visual_description", ""),
             }
     for location in creative_document.get("locations", []):
         lid = str(location.get("id", ""))
@@ -579,6 +723,16 @@ def run_llm_pipeline(
     for scene in creative_document.get("scenes", []):
         scene_id = str(scene.get("scene_id"))
         prompt = scene.get("scene_prompt", scene.get("narrative_description", ""))
+
+        # ── Build per-scene character number assignment for logging ──
+        characters_map = {
+            item["id"]: item
+            for item in creative_document.get("characters", [])
+            if "id" in item
+        }
+        scene_char_assignments = agent._build_scene_character_assignments(
+            scene, characters_map
+        )
 
         critique_result: Dict[str, Any] = {
             "score": 0.5,
@@ -615,6 +769,8 @@ def run_llm_pipeline(
             "accept": bool(critique_result.get("accept", False)),
             "issues": critique_result.get("issues", []),
         }
+        # Store which numbered alias was assigned to each character in this scene
+        scene["scene_character_assignments"] = scene_char_assignments
 
         memory.update_after_scene(
             scene_id=scene_id,
@@ -628,10 +784,19 @@ def run_llm_pipeline(
                 "scene_id": scene_id,
                 "prompt": prompt,
                 "critique": scene["llm_critique"],
+                # Numbered character aliases for downstream consumers
+                "scene_character_assignments": scene_char_assignments,
             }
         )
+        alias_str = ", ".join(
+            f"{v}={characters_map[k].get('name', k)}"
+            for k, v in scene_char_assignments.items()
+            if k in characters_map
+        )
         print(
-            f"[SCENE {scene_id}] score={scene['llm_critique']['score']:.4f} accept={scene['llm_critique']['accept']}"
+            f"[SCENE {scene_id}] score={scene['llm_critique']['score']:.4f} "
+            f"accept={scene['llm_critique']['accept']} "
+            f"chars=[{alias_str}]"
         )
 
     with open(creative_doc_path, "w", encoding="utf-8") as handle:
