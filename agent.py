@@ -19,7 +19,24 @@ import open_clip
 import torch
 from PIL import Image
 from transformers import AutoTokenizer, pipeline as hf_pipeline
-from trl import AutoModelForCausalLMWithValueHead, PPOConfig, PPOTrainer
+
+# TRL compatibility shim:
+# - trl <= 0.8.x  : AutoModelForCausalLMWithValueHead / PPOConfig / PPOTrainer live at top level.
+# - trl >= 0.9    : they were moved to trl.models / trl.trainer sub-packages or removed.
+# Recommended: pin "trl==0.8.6" in your environment (see requirements.txt / notebook cell 1).
+try:
+    from trl import AutoModelForCausalLMWithValueHead, PPOConfig, PPOTrainer
+except ImportError:
+    try:
+        from trl.models.modeling_value_head import AutoModelForCausalLMWithValueHead
+        from trl.trainer.ppo_trainer import PPOTrainer
+        from trl.trainer.ppo_config import PPOConfig
+    except ImportError as _trl_exc:
+        raise ImportError(
+            "Could not import TRL PPO classes. "
+            "Install the compatible version with:  pip install 'trl==0.8.6'\n"
+            f"Original error: {_trl_exc}"
+        ) from _trl_exc
 
 from config import (
     CLIP_CONSISTENCY_THRESHOLD,
@@ -40,27 +57,29 @@ from config import (
 # Memory — mirrors LLMRunMemory but extended with RL reward tracking
 # ──────────────────────────────────────────────────────────────────────────────
 
+
 @dataclass
 class RLRunMemory:
     """
     Persistent continuity store for the RL pipeline.
     Mirrors LLMRunMemory exactly, adding reward_curve and clip_score for RL tracking.
     """
+
     state_path: str
     character_registry: Dict[str, Dict[str, Any]] = field(default_factory=dict)
-    location_registry:  Dict[str, Dict[str, Any]] = field(default_factory=dict)
-    continuity_log:     List[str]                  = field(default_factory=list)
-    episode_log:        List[Dict[str, Any]]        = field(default_factory=list)
-    reward_curve:       List[float]                 = field(default_factory=list)
+    location_registry: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    continuity_log: List[str] = field(default_factory=list)
+    episode_log: List[Dict[str, Any]] = field(default_factory=list)
+    reward_curve: List[float] = field(default_factory=list)
 
     def save(self) -> None:
         os.makedirs(os.path.dirname(self.state_path), exist_ok=True)
         payload = {
             "character_registry": self.character_registry,
-            "location_registry":  self.location_registry,
-            "continuity_log":     self.continuity_log,
-            "episode_log":        self.episode_log,
-            "reward_curve":       self.reward_curve,
+            "location_registry": self.location_registry,
+            "continuity_log": self.continuity_log,
+            "episode_log": self.episode_log,
+            "reward_curve": self.reward_curve,
         }
         with open(self.state_path, "w", encoding="utf-8") as handle:
             json.dump(payload, handle, indent=2, ensure_ascii=False)
@@ -71,10 +90,10 @@ class RLRunMemory:
         with open(self.state_path, "r", encoding="utf-8") as handle:
             payload = json.load(handle)
         self.character_registry = payload.get("character_registry", {})
-        self.location_registry  = payload.get("location_registry",  {})
-        self.continuity_log     = payload.get("continuity_log",     [])
-        self.episode_log        = payload.get("episode_log",        [])
-        self.reward_curve       = payload.get("reward_curve",       [])
+        self.location_registry = payload.get("location_registry", {})
+        self.continuity_log = payload.get("continuity_log", [])
+        self.episode_log = payload.get("episode_log", [])
+        self.reward_curve = payload.get("reward_curve", [])
         return True
 
     def get_state_for_agent(self) -> str:
@@ -106,27 +125,29 @@ class RLRunMemory:
 
     def update_after_scene(
         self,
-        scene_id:        str,
-        prompt:          str,
-        critique_score:  float,
+        scene_id: str,
+        prompt: str,
+        critique_score: float,
         critique_issues: List[str],
-        clip_score:      float,
-        ppo_reward:      float,
+        clip_score: float,
+        ppo_reward: float,
     ) -> None:
         self.continuity_log.append(
             f"Scene {scene_id} finalized. "
             f"llm_score={critique_score:.4f} clip_score={clip_score:.4f} "
             f"ppo_reward={ppo_reward:.4f}. prompt={prompt[:220]}"
         )
-        self.episode_log.append({
-            "scene_id":        scene_id,
-            "prompt_used":     prompt,
-            "critique_score":  float(critique_score),
-            "clip_score":      float(clip_score),
-            "ppo_reward":      float(ppo_reward),
-            "critique_issues": [str(i) for i in critique_issues],
-            "timestamp":       int(time.time()),
-        })
+        self.episode_log.append(
+            {
+                "scene_id": scene_id,
+                "prompt_used": prompt,
+                "critique_score": float(critique_score),
+                "clip_score": float(clip_score),
+                "ppo_reward": float(ppo_reward),
+                "critique_issues": [str(i) for i in critique_issues],
+                "timestamp": int(time.time()),
+            }
+        )
         self.reward_curve.append(float(ppo_reward))
         self.save()
 
@@ -135,17 +156,19 @@ class RLRunMemory:
 # Dataclass returned by SelfCritic (CLIP-based)
 # ──────────────────────────────────────────────────────────────────────────────
 
+
 @dataclass
 class CritiqueResult:
     consistency_score: float
-    critique:          str
-    retry:             bool
-    suggested_prompt:  str
+    critique: str
+    retry: bool
+    suggested_prompt: str
 
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Local LLM inference helper
 # ──────────────────────────────────────────────────────────────────────────────
+
 
 class LocalLLM:
     """
@@ -168,10 +191,10 @@ class LocalLLM:
         do_sample: bool = True,
     ):
         self.model_name_or_path = model_name_or_path
-        self.max_new_tokens     = max_new_tokens
-        self.temperature        = temperature
-        self.do_sample          = do_sample
-        self.device             = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        self.max_new_tokens = max_new_tokens
+        self.temperature = temperature
+        self.do_sample = do_sample
+        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
 
         print(f"[LocalLLM] Loading '{model_name_or_path}' on {self.device} …")
         self._pipe = hf_pipeline(
@@ -194,8 +217,8 @@ class LocalLLM:
         # ── Try chat-template format (Llama-3, Mistral, Qwen, etc.) ──────────
         if hasattr(tokenizer, "chat_template") and tokenizer.chat_template:
             messages = [
-                {"role": "system",    "content": system_prompt},
-                {"role": "user",      "content": user_prompt},
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
             ]
             try:
                 prompt = tokenizer.apply_chat_template(
@@ -203,7 +226,9 @@ class LocalLLM:
                 )
             except Exception:
                 # Fallback: some templates don't accept system role
-                messages = [{"role": "user", "content": f"{system_prompt}\n\n{user_prompt}"}]
+                messages = [
+                    {"role": "user", "content": f"{system_prompt}\n\n{user_prompt}"}
+                ]
                 prompt = tokenizer.apply_chat_template(
                     messages, tokenize=False, add_generation_prompt=True
                 )
@@ -221,7 +246,7 @@ class LocalLLM:
             temperature=self.temperature,
             do_sample=self.do_sample,
             pad_token_id=tokenizer.eos_token_id,
-            return_full_text=False,   # return only the generated part
+            return_full_text=False,  # return only the generated part
         )
         return outputs[0]["generated_text"].strip()
 
@@ -229,6 +254,7 @@ class LocalLLM:
 # ──────────────────────────────────────────────────────────────────────────────
 # Director Agent — fully local, PPO-enabled
 # ──────────────────────────────────────────────────────────────────────────────
+
 
 class DirectorAgent:
     """
@@ -247,10 +273,10 @@ class DirectorAgent:
 
     def __init__(
         self,
-        local_llm:  LocalLLM,
-        device:     Optional[str] = None,
+        local_llm: LocalLLM,
+        device: Optional[str] = None,
     ):
-        self.llm    = local_llm
+        self.llm = local_llm
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
 
         # ── PPO policy model (separate from the generation LLM) ───────────────
@@ -306,8 +332,12 @@ class DirectorAgent:
     @staticmethod
     def _validate_creative_document(doc: Dict[str, Any]) -> Tuple[bool, List[str]]:
         required_top = [
-            "characters", "locations", "scenes",
-            "cinematic_style", "narrative_arc", "color_grading",
+            "characters",
+            "locations",
+            "scenes",
+            "cinematic_style",
+            "narrative_arc",
+            "color_grading",
         ]
         errors: List[str] = []
         for key in required_top:
@@ -321,11 +351,20 @@ class DirectorAgent:
                     errors.append(f"Character {index} must be an object")
                     continue
                 for key in [
-                    "id", "name", "age", "gender",
-                    "skin_tone", "body_type", "height",
-                    "hair_color", "hair_style", "eye_color",
-                    "facial_expression", "distinguishing_features",
-                    "wardrobe", "visual_description",
+                    "id",
+                    "name",
+                    "age",
+                    "gender",
+                    "skin_tone",
+                    "body_type",
+                    "height",
+                    "hair_color",
+                    "hair_style",
+                    "eye_color",
+                    "facial_expression",
+                    "distinguishing_features",
+                    "wardrobe",
+                    "visual_description",
                 ]:
                     if key not in ch:
                         errors.append(f"Character {index} missing '{key}'")
@@ -338,7 +377,13 @@ class DirectorAgent:
                 if not isinstance(loc, dict):
                     errors.append(f"Location {index} must be an object")
                     continue
-                for key in ["id", "name", "scenery_type", "material_palette", "visual_description"]:
+                for key in [
+                    "id",
+                    "name",
+                    "scenery_type",
+                    "material_palette",
+                    "visual_description",
+                ]:
                     if key not in loc:
                         errors.append(f"Location {index} missing '{key}'")
         else:
@@ -350,29 +395,46 @@ class DirectorAgent:
 
         scenes = doc.get("scenes", [])
         if len(scenes) < MIN_SCENES:
-            errors.append(f"Scene count too low: expected at least {MIN_SCENES}, got {len(scenes)}")
+            errors.append(
+                f"Scene count too low: expected at least {MIN_SCENES}, got {len(scenes)}"
+            )
         if len(scenes) > MAX_SCENES:
             errors.append(f"Scene count too high: max {MAX_SCENES}, got {len(scenes)}")
 
-        character_ids = {c.get("id") for c in doc.get("characters", []) if isinstance(c, dict)}
-        location_ids  = {l.get("id") for l in doc.get("locations",  []) if isinstance(l, dict)}
+        character_ids = {
+            c.get("id") for c in doc.get("characters", []) if isinstance(c, dict)
+        }
+        location_ids = {
+            l.get("id") for l in doc.get("locations", []) if isinstance(l, dict)
+        }
 
         for index, scene in enumerate(scenes):
             if not isinstance(scene, dict):
                 errors.append(f"Scene {index} must be an object")
                 continue
             for key in [
-                "scene_id", "narrative_description", "scene_prompt",
-                "character_ids", "location_id", "camera_style",
-                "emotional_tone", "time_of_day", "weather", "continuity_constraints",
+                "scene_id",
+                "narrative_description",
+                "scene_prompt",
+                "character_ids",
+                "location_id",
+                "camera_style",
+                "emotional_tone",
+                "time_of_day",
+                "weather",
+                "continuity_constraints",
             ]:
                 if key not in scene:
                     errors.append(f"Scene {index} missing '{key}'")
             for cid in scene.get("character_ids", []):
                 if cid not in character_ids:
-                    errors.append(f"Scene {index} references unknown character_id: {cid}")
+                    errors.append(
+                        f"Scene {index} references unknown character_id: {cid}"
+                    )
             if scene.get("location_id") not in location_ids:
-                errors.append(f"Scene {index} references unknown location_id: {scene.get('location_id')}")
+                errors.append(
+                    f"Scene {index} references unknown location_id: {scene.get('location_id')}"
+                )
 
         return len(errors) == 0, errors
 
@@ -385,64 +447,84 @@ class DirectorAgent:
         characters: List[Dict[str, Any]] = []
         for index, item in enumerate(doc.get("characters", [])):
             cid = item.get("id", f"char_{index + 1}")
-            characters.append({
-                "id":     str(cid),
-                "name":   item.get("name",   f"Character {index + 1}"),
-                "age":    item.get("age",    "adult"),
-                "gender": item.get("gender", "unspecified"),
-                # ── Detailed physical appearance ──────────────────────────────
-                "skin_tone":  item.get("skin_tone",  "medium"),
-                "body_type":  item.get("body_type",  "average"),        # slim/athletic/average/heavyset/muscular
-                "height":     item.get("height",     "average height"), # e.g. "5ft 10in, tall"
-                "hair_color": item.get("hair_color", "brown"),
-                "hair_style": item.get("hair_style", "medium length"),
-                "eye_color":  item.get("eye_color",  "brown"),
-                "facial_expression":      item.get("facial_expression",     "neutral"),  # happy/sad/angry/determined/scared
-                "distinguishing_features": item.get("distinguishing_features", ""),      # scars, tattoos, beard, glasses
-                # ── Wardrobe & full visual summary ────────────────────────────
-                "wardrobe":           item.get("wardrobe",           "consistent outfit"),
-                "visual_description": item.get("visual_description", ""),
-                "reference_image_paths": item.get("reference_image_paths", []),
-            })
+            characters.append(
+                {
+                    "id": str(cid),
+                    "name": item.get("name", f"Character {index + 1}"),
+                    "age": item.get("age", "adult"),
+                    "gender": item.get("gender", "unspecified"),
+                    # ── Detailed physical appearance ──────────────────────────────
+                    "skin_tone": item.get("skin_tone", "medium"),
+                    "body_type": item.get(
+                        "body_type", "average"
+                    ),  # slim/athletic/average/heavyset/muscular
+                    "height": item.get(
+                        "height", "average height"
+                    ),  # e.g. "5ft 10in, tall"
+                    "hair_color": item.get("hair_color", "brown"),
+                    "hair_style": item.get("hair_style", "medium length"),
+                    "eye_color": item.get("eye_color", "brown"),
+                    "facial_expression": item.get(
+                        "facial_expression", "neutral"
+                    ),  # happy/sad/angry/determined/scared
+                    "distinguishing_features": item.get(
+                        "distinguishing_features", ""
+                    ),  # scars, tattoos, beard, glasses
+                    # ── Wardrobe & full visual summary ────────────────────────────
+                    "wardrobe": item.get("wardrobe", "consistent outfit"),
+                    "visual_description": item.get("visual_description", ""),
+                    "reference_image_paths": item.get("reference_image_paths", []),
+                }
+            )
 
         locations: List[Dict[str, Any]] = []
         for index, item in enumerate(doc.get("locations", [])):
             lid = item.get("id", f"loc_{index + 1}")
-            locations.append({
-                "id":               str(lid),
-                "name":             item.get("name",             f"Location {index + 1}"),
-                "scenery_type":     item.get("scenery_type",     "environment"),
-                "material_palette": item.get("material_palette", "neutral tones"),
-                "visual_description": item.get("visual_description", ""),
-                "reference_image_paths": item.get("reference_image_paths", []),
-            })
+            locations.append(
+                {
+                    "id": str(lid),
+                    "name": item.get("name", f"Location {index + 1}"),
+                    "scenery_type": item.get("scenery_type", "environment"),
+                    "material_palette": item.get("material_palette", "neutral tones"),
+                    "visual_description": item.get("visual_description", ""),
+                    "reference_image_paths": item.get("reference_image_paths", []),
+                }
+            )
 
         scenes: List[Dict[str, Any]] = []
         for index, item in enumerate(doc.get("scenes", [])):
             sid = item.get("scene_id", f"scene_{index + 1}")
-            scenes.append({
-                "scene_id":              str(sid),
-                "narrative_description": item.get("narrative_description", "Cinematic progression scene"),
-                "scene_prompt":          item.get("scene_prompt", item.get("narrative_description", "")),
-                "character_ids":         [str(c) for c in item.get("character_ids", [])],
-                "location_id":           str(item.get("location_id", "")),
-                "camera_style":          item.get("camera_style",   "cinematic tracking shot"),
-                "emotional_tone":        item.get("emotional_tone", "neutral"),
-                "time_of_day":           item.get("time_of_day",    "day"),
-                "weather":               item.get("weather",        "clear"),
-                "continuity_constraints": item.get(
-                    "continuity_constraints",
-                    "Keep character identity, outfit, and scenery palette unchanged.",
-                ),
-            })
+            scenes.append(
+                {
+                    "scene_id": str(sid),
+                    "narrative_description": item.get(
+                        "narrative_description", "Cinematic progression scene"
+                    ),
+                    "scene_prompt": item.get(
+                        "scene_prompt", item.get("narrative_description", "")
+                    ),
+                    "character_ids": [str(c) for c in item.get("character_ids", [])],
+                    "location_id": str(item.get("location_id", "")),
+                    "camera_style": item.get("camera_style", "cinematic tracking shot"),
+                    "emotional_tone": item.get("emotional_tone", "neutral"),
+                    "time_of_day": item.get("time_of_day", "day"),
+                    "weather": item.get("weather", "clear"),
+                    "continuity_constraints": item.get(
+                        "continuity_constraints",
+                        "Keep character identity, outfit, and scenery palette unchanged.",
+                    ),
+                }
+            )
 
         return {
-            "characters":      characters,
-            "locations":       locations,
-            "scenes":          scenes,
+            "characters": characters,
+            "locations": locations,
+            "scenes": scenes,
             "cinematic_style": doc.get("cinematic_style", "cinematic realism"),
-            "narrative_arc":   doc.get("narrative_arc",   "setup -> conflict -> resolution"),
-            "color_grading":   doc.get("color_grading",   "filmic teal-orange"),
+            "narrative_arc": doc.get(
+                "narrative_arc", "setup -> conflict -> resolution"
+            ),
+            "color_grading": doc.get("color_grading", "filmic teal-orange"),
         }
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -451,7 +533,7 @@ class DirectorAgent:
 
     @staticmethod
     def _build_scene_character_assignments(
-        scene:      Dict[str, Any],
+        scene: Dict[str, Any],
         characters: Dict[str, Dict[str, Any]],
     ) -> Dict[str, str]:
         """
@@ -511,8 +593,8 @@ class DirectorAgent:
         try:
             response = self._call_llm(system, user)
             critique = self._extract_json_block(response)
-            valid    = bool(critique.get("valid", False))
-            issues   = critique.get("issues", [])
+            valid = bool(critique.get("valid", False))
+            issues = critique.get("issues", [])
             if not isinstance(issues, list):
                 issues = ["Critic returned non-list issues field"]
             return valid, [str(i) for i in issues]
@@ -579,15 +661,19 @@ class DirectorAgent:
             f"Current continuity state:\n{memory_state}\n"
         )
 
-        issues:        List[str]        = []
-        candidate_doc: Dict[str, Any]   = {}
+        issues: List[str] = []
+        candidate_doc: Dict[str, Any] = {}
 
         for _ in range(max(2, RL_EPISODES_PER_SCENE)):
             augmentation = ""
             if issues:
-                augmentation = "Fix these issues from previous attempt:\n- " + "\n- ".join(issues)
-            response      = self._call_llm(system, user_template + "\n" + augmentation)
-            candidate_doc = self._normalize_creative_document(self._extract_json_block(response))
+                augmentation = (
+                    "Fix these issues from previous attempt:\n- " + "\n- ".join(issues)
+                )
+            response = self._call_llm(system, user_template + "\n" + augmentation)
+            candidate_doc = self._normalize_creative_document(
+                self._extract_json_block(response)
+            )
             valid, issues = self._self_critique_document(candidate_doc)
             if valid:
                 return candidate_doc
@@ -602,9 +688,9 @@ class DirectorAgent:
 
     def refine_scene_prompt(
         self,
-        scene:             Dict[str, Any],
+        scene: Dict[str, Any],
         creative_document: Dict[str, Any],
-        memory_state:      str,
+        memory_state: str,
     ) -> str:
         system = (
             "You are a prompt engineer for cinematic text-to-video systems. "
@@ -622,7 +708,9 @@ class DirectorAgent:
             if "id" in item
         }
 
-        scene_char_assignments = self._build_scene_character_assignments(scene, characters)
+        scene_char_assignments = self._build_scene_character_assignments(
+            scene, characters
+        )
 
         char_blocks: List[str] = []
         for cid in scene.get("character_ids", []):
@@ -680,12 +768,14 @@ class DirectorAgent:
 
     def critique_scene_prompt(
         self,
-        scene:             Dict[str, Any],
-        scene_prompt:      str,
+        scene: Dict[str, Any],
+        scene_prompt: str,
         creative_document: Dict[str, Any],
-        memory_state:      str,
+        memory_state: str,
     ) -> Dict[str, Any]:
-        system = "You are a strict cinematic continuity critic. Return strict JSON only."
+        system = (
+            "You are a strict cinematic continuity critic. Return strict JSON only."
+        )
         user = (
             'Return JSON: {"score":0.0-1.0, "accept":bool, "issues":[str], "revised_prompt":"..."}\n'
             "Evaluate this scene prompt for:\n"
@@ -700,21 +790,28 @@ class DirectorAgent:
         )
         try:
             response = self._call_llm(system, user)
-            parsed   = self._extract_json_block(response)
+            parsed = self._extract_json_block(response)
         except Exception:
-            parsed = {"score": 0.5, "accept": True, "issues": [], "revised_prompt": scene_prompt}
+            parsed = {
+                "score": 0.5,
+                "accept": True,
+                "issues": [],
+                "revised_prompt": scene_prompt,
+            }
 
-        score  = max(0.0, min(1.0, float(parsed.get("score", 0.5))))
+        score = max(0.0, min(1.0, float(parsed.get("score", 0.5))))
         accept = bool(parsed.get("accept", score >= 0.7))
         issues = parsed.get("issues", [])
         if not isinstance(issues, list):
             issues = [str(issues)]
-        revised_prompt = str(parsed.get("revised_prompt", scene_prompt)).strip() or scene_prompt
+        revised_prompt = (
+            str(parsed.get("revised_prompt", scene_prompt)).strip() or scene_prompt
+        )
 
         return {
-            "score":          score,
-            "accept":         accept,
-            "issues":         [str(i) for i in issues],
+            "score": score,
+            "accept": accept,
+            "issues": [str(i) for i in issues],
             "revised_prompt": revised_prompt,
         }
 
@@ -724,15 +821,21 @@ class DirectorAgent:
 
     def update_policy(
         self,
-        scene_state_text:   str,
+        scene_state_text: str,
         action_prompt_text: str,
-        reward:             float,
+        reward: float,
     ) -> Dict[str, Any]:
-        query_tensor    = self.tokenizer.encode(scene_state_text,   return_tensors="pt").to(self.device)[0]
-        response_tensor = self.tokenizer.encode(action_prompt_text, return_tensors="pt").to(self.device)[0]
-        reward_tensor   = torch.tensor(float(reward), dtype=torch.float32).to(self.device)
+        query_tensor = self.tokenizer.encode(scene_state_text, return_tensors="pt").to(
+            self.device
+        )[0]
+        response_tensor = self.tokenizer.encode(
+            action_prompt_text, return_tensors="pt"
+        ).to(self.device)[0]
+        reward_tensor = torch.tensor(float(reward), dtype=torch.float32).to(self.device)
         try:
-            stats = self.ppo_trainer.step([query_tensor], [response_tensor], [reward_tensor])
+            stats = self.ppo_trainer.step(
+                [query_tensor], [response_tensor], [reward_tensor]
+            )
             return {
                 "status": "updated",
                 "stats": {
@@ -748,15 +851,16 @@ class DirectorAgent:
 # Prompt Enricher
 # ──────────────────────────────────────────────────────────────────────────────
 
+
 class PromptEnricher:
     def __init__(self, director: Optional[DirectorAgent] = None):
         self.director = director
 
     def enrich(
         self,
-        scene:             Dict[str, Any],
+        scene: Dict[str, Any],
         creative_document: Dict[str, Any],
-        memory_state:      str,
+        memory_state: str,
     ) -> str:
         characters = {
             item["id"]: item
@@ -814,7 +918,7 @@ class PromptEnricher:
                 "and do not visually clash with each other.\n"
             )
 
-        loc           = locations.get(scene.get("location_id"), {})
+        loc = locations.get(scene.get("location_id"), {})
         location_text = loc.get("visual_description", "")
 
         base_prompt = (
@@ -861,14 +965,15 @@ class PromptEnricher:
 # Self Critic (CLIP-based visual consistency)
 # ──────────────────────────────────────────────────────────────────────────────
 
+
 class SelfCritic:
     def __init__(
         self,
         threshold: float = CLIP_CONSISTENCY_THRESHOLD,
-        device:    Optional[str] = None,
+        device: Optional[str] = None,
     ):
         self.threshold = threshold
-        self.device    = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.model, _, self.preprocess = open_clip.create_model_and_transforms(
             "ViT-B-32", pretrained="openai"
         )
@@ -905,13 +1010,13 @@ class SelfCritic:
 
     def evaluate(
         self,
-        clip_path:                  str,
+        clip_path: str,
         character_reference_images: List[str],
-        location_reference_images:  List[str],
-        current_prompt:             str,
+        location_reference_images: List[str],
+        current_prompt: str,
     ) -> CritiqueResult:
         try:
-            frames    = self._sample_frames(clip_path, count=5)
+            frames = self._sample_frames(clip_path, count=5)
             frame_emb = self._embed_images(frames)
 
             ref_images: List[Image.Image] = []
@@ -927,12 +1032,13 @@ class SelfCritic:
                     suggested_prompt=current_prompt,
                 )
 
-            ref_emb   = self._embed_images(ref_images)
-            score     = float((frame_emb @ ref_emb.T).mean().item())
-            retry     = score < self.threshold
-            critique  = f"Consistency score={score:.4f}. " + (
+            ref_emb = self._embed_images(ref_images)
+            score = float((frame_emb @ ref_emb.T).mean().item())
+            retry = score < self.threshold
+            critique = f"Consistency score={score:.4f}. " + (
                 "Below threshold; reinforce character facial traits, wardrobe, and location materials/lighting."
-                if retry else "Consistency acceptable."
+                if retry
+                else "Consistency acceptable."
             )
             suggested = current_prompt
             if retry:
@@ -967,32 +1073,33 @@ class SelfCritic:
 # Pipeline orchestration  (mirrors run_llm_pipeline exactly)
 # ──────────────────────────────────────────────────────────────────────────────
 
+
 def _ensure_rl_dirs(output_root: str) -> Dict[str, str]:
-    output_dir      = os.path.join(output_root, OUTPUT_DIR,      "rl_only")
+    output_dir = os.path.join(output_root, OUTPUT_DIR, "rl_only")
     story_bible_dir = os.path.join(output_root, STORY_BIBLE_DIR, "rl_only")
-    memory_dir      = os.path.join(output_root, "memory_rl")
+    memory_dir = os.path.join(output_root, "memory_rl")
     for path in [output_dir, story_bible_dir, memory_dir]:
         os.makedirs(path, exist_ok=True)
     return {
-        "output_dir":      output_dir,
+        "output_dir": output_dir,
         "story_bible_dir": story_bible_dir,
-        "memory_dir":      memory_dir,
+        "memory_dir": memory_dir,
     }
 
 
 def run_rl_pipeline(
-    seed_prompt:          str,
-    output_root:          str,
-    local_model_name:     str,
-    resume:               bool,
+    seed_prompt: str,
+    output_root: str,
+    local_model_name: str,
+    resume: bool,
 ) -> str:
     print("=" * 80)
     print("RL-ONLY CINEMATIC AGENT PIPELINE  (fully local, RunPod)")
     print("=" * 80)
 
-    dirs        = _ensure_rl_dirs(output_root)
+    dirs = _ensure_rl_dirs(output_root)
     memory_path = os.path.join(dirs["memory_dir"], "state_rl.json")
-    memory      = RLRunMemory(state_path=memory_path)
+    memory = RLRunMemory(state_path=memory_path)
 
     if resume and memory.load():
         print("[INFO] Loaded existing RL memory state")
@@ -1001,11 +1108,13 @@ def run_rl_pipeline(
 
     # ── Boot local LLM (loaded once, reused for all calls) ───────────────────
     local_llm = LocalLLM(model_name_or_path=local_model_name)
-    agent     = DirectorAgent(local_llm=local_llm)
+    agent = DirectorAgent(local_llm=local_llm)
 
-    creative_doc_path = os.path.join(dirs["story_bible_dir"], "creative_document_rl.json")
-    prompts_path      = os.path.join(dirs["output_dir"],      "scene_prompts_rl.json")
-    report_path       = os.path.join(dirs["output_dir"],      "rl_pipeline_report.json")
+    creative_doc_path = os.path.join(
+        dirs["story_bible_dir"], "creative_document_rl.json"
+    )
+    prompts_path = os.path.join(dirs["output_dir"], "scene_prompts_rl.json")
+    report_path = os.path.join(dirs["output_dir"], "rl_pipeline_report.json")
 
     # ── Step 1: Generate Creative Document ───────────────────────────────────
     print("[STEP] Generate creative document")
@@ -1019,25 +1128,25 @@ def run_rl_pipeline(
         cid = str(character.get("id", ""))
         if cid:
             memory.character_registry[cid] = {
-                "name":                    character.get("name",                    ""),
-                "gender":                  character.get("gender",                  "unspecified"),
-                "age":                     character.get("age",                     "adult"),
-                "skin_tone":               character.get("skin_tone",               ""),
-                "body_type":               character.get("body_type",               ""),
-                "height":                  character.get("height",                  ""),
-                "hair_color":              character.get("hair_color",              ""),
-                "hair_style":              character.get("hair_style",              ""),
-                "eye_color":               character.get("eye_color",               ""),
-                "facial_expression":       character.get("facial_expression",       ""),
+                "name": character.get("name", ""),
+                "gender": character.get("gender", "unspecified"),
+                "age": character.get("age", "adult"),
+                "skin_tone": character.get("skin_tone", ""),
+                "body_type": character.get("body_type", ""),
+                "height": character.get("height", ""),
+                "hair_color": character.get("hair_color", ""),
+                "hair_style": character.get("hair_style", ""),
+                "eye_color": character.get("eye_color", ""),
+                "facial_expression": character.get("facial_expression", ""),
                 "distinguishing_features": character.get("distinguishing_features", ""),
-                "wardrobe":                character.get("wardrobe",                ""),
-                "visual_description":      character.get("visual_description",      ""),
+                "wardrobe": character.get("wardrobe", ""),
+                "visual_description": character.get("visual_description", ""),
             }
     for location in creative_document.get("locations", []):
         lid = str(location.get("id", ""))
         if lid:
             memory.location_registry[lid] = {
-                "name":             location.get("name",             ""),
+                "name": location.get("name", ""),
                 "material_palette": location.get("material_palette", ""),
             }
     memory.save()
@@ -1056,12 +1165,17 @@ def run_rl_pipeline(
 
     for scene in creative_document.get("scenes", []):
         scene_id = str(scene.get("scene_id"))
-        prompt   = scene.get("scene_prompt", scene.get("narrative_description", ""))
+        prompt = scene.get("scene_prompt", scene.get("narrative_description", ""))
 
-        scene_char_assignments = agent._build_scene_character_assignments(scene, characters_map)
+        scene_char_assignments = agent._build_scene_character_assignments(
+            scene, characters_map
+        )
 
         critique_result: Dict[str, Any] = {
-            "score": 0.5, "accept": True, "issues": [], "revised_prompt": prompt,
+            "score": 0.5,
+            "accept": True,
+            "issues": [],
+            "revised_prompt": prompt,
         }
 
         for attempt in range(max(2, RL_EPISODES_PER_SCENE)):
@@ -1090,32 +1204,34 @@ def run_rl_pipeline(
             reward=ppo_reward,
         )
 
-        scene["scene_prompt"]               = prompt
-        scene["llm_critique"]               = {
-            "score":  float(critique_result.get("score",  0.5)),
+        scene["scene_prompt"] = prompt
+        scene["llm_critique"] = {
+            "score": float(critique_result.get("score", 0.5)),
             "accept": bool(critique_result.get("accept", False)),
             "issues": critique_result.get("issues", []),
         }
         scene["scene_character_assignments"] = scene_char_assignments
-        scene["ppo_update"]                  = ppo_result
+        scene["ppo_update"] = ppo_result
 
         memory.update_after_scene(
             scene_id=scene_id,
             prompt=prompt,
-            critique_score=float(critique_result.get("score",  0.5)),
+            critique_score=float(critique_result.get("score", 0.5)),
             critique_issues=critique_result.get("issues", []),
-            clip_score=0.0,       # populated post-video-generation via SelfCritic
+            clip_score=0.0,  # populated post-video-generation via SelfCritic
             ppo_reward=ppo_reward,
         )
 
-        refined_scenes.append({
-            "scene_id":                   scene_id,
-            "prompt":                     prompt,
-            "critique":                   scene["llm_critique"],
-            "ppo_reward":                 ppo_reward,
-            "ppo_update":                 ppo_result,
-            "scene_character_assignments": scene_char_assignments,
-        })
+        refined_scenes.append(
+            {
+                "scene_id": scene_id,
+                "prompt": prompt,
+                "critique": scene["llm_critique"],
+                "ppo_reward": ppo_reward,
+                "ppo_update": ppo_result,
+                "scene_character_assignments": scene_char_assignments,
+            }
+        )
 
         alias_str = ", ".join(
             f"{v}={characters_map[k].get('name', k)}"
@@ -1133,23 +1249,29 @@ def run_rl_pipeline(
     with open(creative_doc_path, "w", encoding="utf-8") as handle:
         json.dump(creative_document, handle, indent=2, ensure_ascii=False)
     with open(prompts_path, "w", encoding="utf-8") as handle:
-        json.dump(refined_scenes,    handle, indent=2, ensure_ascii=False)
+        json.dump(refined_scenes, handle, indent=2, ensure_ascii=False)
 
-    scores      = [float(item.get("critique", {}).get("score", 0.0)) for item in refined_scenes]
-    mean_score  = sum(scores) / len(scores) if scores else 0.0
-    mean_reward = sum(memory.reward_curve) / len(memory.reward_curve) if memory.reward_curve else 0.0
+    scores = [
+        float(item.get("critique", {}).get("score", 0.0)) for item in refined_scenes
+    ]
+    mean_score = sum(scores) / len(scores) if scores else 0.0
+    mean_reward = (
+        sum(memory.reward_curve) / len(memory.reward_curve)
+        if memory.reward_curve
+        else 0.0
+    )
 
     report = {
-        "pipeline":             "rl_only",
-        "local_model":          local_model_name,
-        "scene_count":          len(refined_scenes),
-        "mean_critique_score":  float(mean_score),
-        "mean_ppo_reward":      float(mean_reward),
-        "reward_curve":         memory.reward_curve,
+        "pipeline": "rl_only",
+        "local_model": local_model_name,
+        "scene_count": len(refined_scenes),
+        "mean_critique_score": float(mean_score),
+        "mean_ppo_reward": float(mean_reward),
+        "reward_curve": memory.reward_curve,
         "creative_document_path": creative_doc_path,
-        "scene_prompts_path":   prompts_path,
-        "memory_path":          memory_path,
-        "timestamp":            int(time.time()),
+        "scene_prompts_path": prompts_path,
+        "memory_path": memory_path,
+        "timestamp": int(time.time()),
     }
     with open(report_path, "w", encoding="utf-8") as handle:
         json.dump(report, handle, indent=2, ensure_ascii=False)
@@ -1169,6 +1291,7 @@ def run_rl_pipeline(
 # ──────────────────────────────────────────────────────────────────────────────
 # CLI entry-point  (mirrors LLM pipeline parse_args / main)
 # ──────────────────────────────────────────────────────────────────────────────
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
